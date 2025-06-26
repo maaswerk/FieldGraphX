@@ -27,6 +27,7 @@ namespace FieldGraphX
             this.tsbClose = new System.Windows.Forms.ToolStripButton();
             this.tssSeparator1 = new System.Windows.Forms.ToolStripSeparator();
             this.flpResults = new System.Windows.Forms.FlowLayoutPanel();
+            this.flowVisualizer1 = new FlowVisualizer();
             this.button1 = new System.Windows.Forms.Button();
             this.checkBox1 = new System.Windows.Forms.CheckBox();
             this.SuspendLayout();
@@ -101,10 +102,21 @@ namespace FieldGraphX
             // 
             this.flpResults.AutoScroll = true;
             this.flpResults.FlowDirection = System.Windows.Forms.FlowDirection.TopDown;
-            this.flpResults.Location = new System.Drawing.Point(23, 125);
+            this.flpResults.Location = new System.Drawing.Point(1523, 73);
             this.flpResults.Name = "flpResults";
-            this.flpResults.Size = new System.Drawing.Size(1433, 367);
+            this.flpResults.Size = new System.Drawing.Size(29, 429);
             this.flpResults.TabIndex = 6;
+            this.flpResults.Visible = false;
+            // 
+            // flowVisualizer1
+            // 
+            this.flowVisualizer1.BackColor = System.Drawing.Color.White;
+            this.flowVisualizer1.Location = new System.Drawing.Point(23, 116);
+            this.flowVisualizer1.Name = "flowVisualizer1";
+            this.flowVisualizer1.Size = new System.Drawing.Size(1494, 469);
+            this.flowVisualizer1.TabIndex = 9;
+            this.flowVisualizer1.Text = "flowVisualizer1";
+            this.flowVisualizer1.TriggerFlows = null;
             // 
             // button1
             // 
@@ -128,6 +140,7 @@ namespace FieldGraphX
             // 
             // FieldGraphXControl
             // 
+            this.Controls.Add(this.flowVisualizer1);
             this.Controls.Add(this.checkBox1);
             this.Controls.Add(this.button1);
             this.Controls.Add(this.cmbEntities);
@@ -160,5 +173,6 @@ namespace FieldGraphX
         private FlowLayoutPanel flpResults;
         private Button button1;
         private CheckBox checkBox1;
+        private FlowVisualizer flowVisualizer1;
     }
 }

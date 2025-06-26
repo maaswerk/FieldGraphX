@@ -2,7 +2,6 @@
 using FlowGraphX;
 using McTools.Xrm.Connection;
 using Microsoft.Xrm.Sdk;
-using Microsoft.Xrm.Sdk.Query;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -67,11 +66,14 @@ namespace FieldGraphX
             if(cmbEntities.Text?.Trim()?.ToLower() != "")
             {
                 cmbFields.DataSource = myInfoLoader.LoadFields(cmbEntities.Text.Trim().ToLower());
+                
             }
             else
             {
                 cmbFields.DataSource = new List<string>();
             }
+            cmbEntities.Text = "msdyn_workorder";
+            cmbFields.Text = "ith_level_txt";
         }
 
 
@@ -260,7 +262,7 @@ namespace FieldGraphX
                         if (checkBox1.Checked) // Wenn die Checkbox aktiviert ist, einfache Visualisierung verwenden
                             VisualizeFlowHierarchyWithArrows(hierarchy);
                         else // Ansonsten die komplexe Visualisierung verwenden (FlowVisualizationPanel
-                            MessageBox.Show("Not implementet");//VisualizeFlowHierarchy(hierarchy); // Hier die Methode aufrufen
+                            TEst(hierarchy);//MessageBox.Show("Not implementet");//VisualizeFlowHierarchy(hierarchy); // Hier die Methode aufrufen
                     }
                     else
                     {
@@ -268,6 +270,15 @@ namespace FieldGraphX
                     }
                 }
             });
+        }
+
+
+        public void TEst(List<FlowUsage> hierarchy)
+        {
+            FlowVisualizer visualizer = new FlowVisualizer();
+            flowVisualizer1.Size = new Size(1494, 469);
+            flowVisualizer1.TriggerFlows = hierarchy;
+            flowVisualizer1.Invalidate(); // Stellt sicher, dass die Darstellung aktualisiert wird
         }
 
 

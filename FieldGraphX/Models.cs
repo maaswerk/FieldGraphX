@@ -33,4 +33,11 @@ namespace FieldGraphX.Models
         public string FieldName { get; set; }
         public List<FlowHierarchyNode> RootNodes { get; set; } = new List<FlowHierarchyNode>();
     }
+
+    public class PositionedFlow
+    {
+        public FlowUsage Flow { get; set; }
+        public int X { get; set; }
+        public int Y { get; set; }
+    }
 }
