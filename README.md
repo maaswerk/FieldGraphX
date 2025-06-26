@@ -1,6 +1,6 @@
 # 🚀 FieldGraphX
 
-**Visualize and analyze data flows in Microsoft Dynamics CRM - interactively, clearly, effectively.
+**Visualize and analyze data flows in Microsoft Dynamics CRM - interactively, clearly, effectively.**
 
 ![Dynamics CRM](https://img.shields.io/badge/Dynamics%20CRM-Integration-blue)
 ![XrmToolBox](https://img.shields.io/badge/XrmToolBox-Plugin-green)
