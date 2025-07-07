@@ -1,5 +1,7 @@
 ﻿using FieldGraphX.Models;
+using Newtonsoft.Json.Linq;
 using System;
+using System.Activities.Expressions;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
@@ -28,107 +30,76 @@ namespace FieldGraphX
         {
             base.OnPaint(e);
             e.Graphics.Clear(Color.White);
-            this.Controls.Clear();
 
             if (TriggerFlows == null || TriggerFlows.Count == 0)
                 return;
 
             var g = e.Graphics;
-            var emojiFont = new Font("Segoe UI Emoji", 9 * zoom);
-            var positioned = LayoutFlows(TriggerFlows);
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
 
-            // Zeichne Flows
-            foreach (var p in positioned)
+            var positionedFlows = LayoutFlows(TriggerFlows);
+
+            foreach (var flow in positionedFlows)
             {
-                int x = (int)(p.X * 320 * zoom + scrollOffset.X);
-                int y = (int)(p.Y * 180 * zoom + scrollOffset.Y);
+                // Skalierte Position und Größe
+                int x = (int)(flow.X * 320 * zoom + scrollOffset.X);
+                int y = (int)(flow.Y * 180 * zoom + scrollOffset.Y);
                 int width = (int)(300 * zoom);
                 int height = (int)(150 * zoom);
-                Rectangle rect = new Rectangle(x, y, width, height);
+
+                var rect = new Rectangle(x, y, width, height);
+
+                // Zeichne Rechteck
+                g.FillRectangle(flow.Flow.Parents?.Count > 0 ? Brushes.LightGray : Brushes.LightCyan, rect);
+                if (flow.Flow.IsFieldUsedAsTrigger && flow.Flow.IsFieldSet)
+                {
+                    g.FillRectangle(Brushes.LightYellow, rect);
+                }
                 g.DrawRectangle(Pens.Black, rect);
 
-                var flow = p.Flow;
-
-                // Flow-Titel & Infos
-                string name = flow.FlowName ?? "Unnamed Flow";
-                string trigger = flow.Trigger != null
-                    ? $"🎯 Trigger: {flow.Trigger.Entity}.{flow.Trigger.Field}"
+                // Zeichne Flow-Titel und Infos
+                string name = flow.Flow.FlowName ?? "Unnamed Flow";
+                string trigger = flow.Flow.Trigger != null
+                    ? $"🎯 Trigger: {flow.Flow.Trigger.Entity}.{flow.Flow.Trigger.Field}"
                     : "❌ No Trigger";
 
-                if(flow.Parents == null || flow.Parents.Count == 0)
-                {
-                    g.FillRectangle(Brushes.LightCyan, rect);
-                }
-                else
-                {
-                    g.FillRectangle(Brushes.LightGray, rect);
-                }
-                    
-
-                string parentInfo = BuildSimplifiedParentInfo(flow);
+                string parentInfo = BuildSimplifiedParentInfo(flow.Flow);
                 var statusParts = new List<string>();
-                if (flow.IsFieldUsedAsTrigger) statusParts.Add("🔵 Uses Field as Trigger");
-                if (flow.IsFieldSet) statusParts.Add("🟢 Sets Field");
+                if (flow.Flow.IsFieldUsedAsTrigger) statusParts.Add("🔵 Uses Field as Trigger");
+                if (flow.Flow.IsFieldSet) statusParts.Add($"🟢 Sets Field '{flow.Flow.SetField}'");
                 string status = string.Join(" | ", statusParts);
 
-                // Text mit automatischem Umbruch
-                g.DrawString(name, emojiFont, Brushes.Black, new RectangleF(x + 5, y + 5, 290, 20));
-                g.DrawString(trigger, emojiFont, Brushes.DarkSlateGray, new RectangleF(x + 5, y + 25, 290, 20));
-                g.DrawString(status, emojiFont, Brushes.DarkGreen, new RectangleF(x + 5, y + 45, 290, 20));
-                g.DrawString(parentInfo, emojiFont, Brushes.Gray, new RectangleF(x + 5, y + 65, 290, 30));
+                g.DrawString(name, new Font("Segoe UI Emoji", 9 * zoom), Brushes.Black, new RectangleF(x + 5, y + 5, width - 10, height - 20));
+                g.DrawString(trigger, new Font("Segoe UI Emoji", 8 * zoom), Brushes.Black, new RectangleF(x + 5, y + 30, width - 10, height - 20));
+                g.DrawString(status, new Font("Segoe UI Emoji", 8 * zoom), Brushes.DarkGreen, new RectangleF(x + 5, y + 45, width - 10, height - 20));
+                g.DrawString(parentInfo, new Font("Segoe UI Emoji", 8 * zoom), Brushes.Gray, new RectangleF(x + 5, y + 65, width - 10, height - 20));
 
-                // Button „Open Flow“
-                var btnOpen = new Button();
-                btnOpen.Text = "Open Flow";
-                btnOpen.Size = new Size((int)(80 * zoom), (int)(30 * zoom));
-                btnOpen.Font = new Font(Font.FontFamily, 8 * zoom); // optional Font-Scaling
-                btnOpen.Location = new Point(x + 105 , y + 115);
-                btnOpen.BackColor = Color.LightSkyBlue;
-                btnOpen.FlatStyle = FlatStyle.Flat;
+                Rectangle rectf = new Rectangle(new Point(x + 105, y + 115), new Size((int)(80 * zoom), (int)(30 * zoom)));
 
-                // Sicherstellen, dass Click-Event korrekt arbeitet
-                btnOpen.Click += (sender, args) =>
+                g.FillRectangle(Brushes.LightSkyBlue, rectf);
+                g.DrawRectangle(Pens.Black, rectf);
+
+                // Flow-Name zeichnen
+                g.DrawString("Open Flow", new Font("Segoe UI Emoji", 8 * zoom), Brushes.Black, rectf.Location);
+                flow.Flow.Button = rectf;
+
+                // Zeichne Verbindungslinien
+                foreach (var parent in flow.Flow.Parents)
                 {
-                    if (!string.IsNullOrEmpty(flow.FlowUrl))
+                    var parentFlow = positionedFlows.FirstOrDefault(p => p.Flow == parent);
+                    if (parentFlow != null)
                     {
-                        try
-                        {
-                            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                            {
-                                FileName = flow.FlowUrl,
-                                UseShellExecute = true
-                            });
-                        }
-                        catch (Exception ex)
-                        {
-                            MessageBox.Show($"Could not open flow: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        }
-                    }
-                    else
-                    {
-                        MessageBox.Show("No URL available for this flow.", "Information", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    }
-                };
-                flowButtons.Add(btnOpen);
-                this.Controls.Add(btnOpen);
-            }
-
-            // Pfeile zeichnen (Parent → Kind)
-            foreach (var p in positioned)
-            {
-                foreach (var parent in p.Flow.Parents)
-                {
-                    var parentPos = positioned.FirstOrDefault(x => x.Flow == parent);
-                    if (parentPos != null)
-                    {
-                        var from = new Point(parentPos.X * 320 + 150 + scrollOffset.X, parentPos.Y * 180 + 150 + scrollOffset.Y);
-                        var to = new Point(p.X * 320 + 150 + scrollOffset.X, p.Y * 180 + scrollOffset.Y);
-                        g.DrawLine(Pens.Black, from, to);
+                        var from = new Point(x + width / 2, y);
+                        var to = new Point((int)(parentFlow.X * 320 * zoom + scrollOffset.X + width / 2),
+                                           (int)(parentFlow.Y * 180 * zoom + scrollOffset.Y + height));
                         DrawArrowHead(g, from, to);
+                        g.DrawLine(Pens.Black, from, to);
                     }
                 }
             }
         }
+
+       
 
 
         private void OpenFlowButton_Click(object sender, EventArgs e)
@@ -159,7 +130,7 @@ namespace FieldGraphX
 
         private void DrawArrowHead(Graphics g, Point from, Point to)
         {
-            var headSize = 6;
+            var headSize = (int)(12 * zoom); // Skalierung der Pfeilspitze
             var angle = Math.Atan2(to.Y - from.Y, to.X - from.X);
             var p1 = new Point(
                 (int)(to.X - headSize * Math.Cos(angle - Math.PI / 6)),
@@ -224,6 +195,33 @@ namespace FieldGraphX
             {
                 lastMouseDown = e.Location;
                 Cursor = Cursors.Hand;
+                foreach (var flow in TriggerFlows)
+                {
+                    if (flow.Button is RectangleF rect && rect.Contains(e.Location))
+                    {
+                        // Klick-Event für das Rechteck
+                        if (!string.IsNullOrEmpty(flow.FlowUrl))
+                        {
+                            try
+                            {
+                                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                                {
+                                    FileName = flow.FlowUrl,
+                                    UseShellExecute = true
+                                });
+                            }
+                            catch (Exception ex)
+                            {
+                                MessageBox.Show($"Error opening flow: {ex.Message}");
+                            }
+                        }
+                        else
+                        {
+                            MessageBox.Show("Flow URL is empty or invalid.");
+                        }
+                        break;
+                    }
+                }
             }
         }
 
@@ -254,41 +252,70 @@ namespace FieldGraphX
         protected override void OnMouseWheel(MouseEventArgs e)
         {
             float oldZoom = zoom;
-            if (e.Delta > 0)
-                zoom *= 1.1f; // Zoom in
-            else
-                zoom /= 1.1f; // Zoom out
+            zoom *= e.Delta > 0 ? 1.1f : 1 / 1.1f;
 
-            // Begrenzung (optional)
-            zoom = Math.Max(0.2f, Math.Min(zoom, 5.0f));
+            // Begrenzung des Zooms
+            zoom = Math.Max(0.2f, Math.Min(5.0f, zoom));
 
-            // Optional: Maus-zentriertes Scrollen
+            // Maus-zentriertes Scrollen
             var mouse = e.Location;
             scrollOffset.X = (int)(mouse.X - (mouse.X - scrollOffset.X) * (zoom / oldZoom));
             scrollOffset.Y = (int)(mouse.Y - (mouse.Y - scrollOffset.Y) * (zoom / oldZoom));
 
-            UpdateButtonPositions(); // falls Buttons verwendet werden
-            Invalidate();
+            Invalidate(); // Neuzeichnen des Controls
         }
 
-        private void UpdateButtonPositions()
+        private void UpdateFlowButtons(List<PositionedFlow> positionedFlows)
         {
-            foreach (var kvp in flowButtons)
+            // Entferne alte Buttons, die nicht mehr benötigt werden
+            foreach (var btn in flowButtons)
             {
-                var button = kvp;
+                Controls.Remove(btn);
+            }
+            flowButtons.Clear();
 
-                // Rechne Position und Größe mit Zoom
-                int x = (int)((button.Location.X * 320 * zoom )+ (scrollOffset.X + 10 * zoom));
-                int y = (int)((button.Location.Y * 180 * zoom) + (scrollOffset.Y + 10 * zoom));
-                int width = (int)(80 * zoom);
-                int height = (int)(30 * zoom);
+            // Erstelle oder aktualisiere Buttons basierend auf den Flows
+            foreach (var positionedFlow in positionedFlows)
+            {
+                var flow = positionedFlow.Flow;
 
-                button.Location = new Point(x, y);
-                button.Size = new Size(width, height);
+                var btnFlow = new Button
+                {
+                    Text = flow.FlowName ?? "Unnamed Flow",
+                    Size = new Size(100, 30),
+                    BackColor = Color.LightSkyBlue,
+                    FlatStyle = FlatStyle.Flat,
+                    Location = new Point(
+                        (int)(positionedFlow.X * 320 * zoom + scrollOffset.X),
+                        (int)(positionedFlow.Y * 180 * zoom + scrollOffset.Y)
+                    )
+                };
 
-                // Optional: Schriftgröße skalieren (mit Limit)
-                float fontSize = Math.Max(6.0f, 8.0f * zoom);
-                button.Font = new Font(Font.FontFamily, fontSize); // neu zeichnen
+                btnFlow.Click += (sender, args) =>
+                {
+                    try
+                    {
+                        if (!string.IsNullOrEmpty(flow.FlowUrl))
+                        {
+                            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                            {
+                                FileName = flow.FlowUrl,
+                                UseShellExecute = true
+                            });
+                        }
+                        else
+                        {
+                            MessageBox.Show("Flow URL is empty or invalid.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Error opening flow: {ex.Message}");
+                    }
+                };
+
+                flowButtons.Add(btnFlow);
+                Controls.Add(btnFlow);
             }
         }
 

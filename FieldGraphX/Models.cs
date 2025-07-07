@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Drawing;
 
 namespace FieldGraphX.Models
 {
@@ -8,10 +9,12 @@ namespace FieldGraphX.Models
         public string FlowName { get; set; }
         public bool IsFieldUsedAsTrigger { get; set; }
         public bool IsFieldSet { get; set; }
+        public string SetField { get; set; }
         public string FlowUrl { get; set; }
         public Trigger Trigger { get; set; }
         public List<FlowUsage> Parents { get; set; } = new List<FlowUsage>();
         public Guid FlowID { get; set; }
+        public RectangleF Button { get; internal set; }
     }
 
     public class Trigger

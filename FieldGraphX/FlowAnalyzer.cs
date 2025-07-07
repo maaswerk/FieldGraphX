@@ -83,6 +83,7 @@ namespace FlowGraphX
 
                     if (usage.IsFieldSet || usage.IsFieldUsedAsTrigger)
                     {
+                        usage.SetField = $"{entityLogicalName}.{fieldLogicalName}"; // Setze das Feld, das verwendet wird
                         results.Add(usage);
                     }
                 }
