@@ -114,6 +114,7 @@ namespace FieldGraphX
             this.tsbToggleDarkMode.Size = new System.Drawing.Size(69, 22);
             this.tsbToggleDarkMode.Text = "Dark Mode";
             this.tsbToggleDarkMode.Click += new System.EventHandler(this.tsbToggleDarkMode_Click);
+            this.tsbToggleDarkMode.Visible = false;
             // 
             // flpResults
             // 
