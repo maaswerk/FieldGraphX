@@ -46,6 +46,9 @@ jobs:
           New-Item -Path ${{ runner.temp }}\scanner -ItemType Directory
           dotnet tool update dotnet-sonarscanner --tool-path ${{ runner.temp }}\scanner
 
+      - name: Install MSBuild
+        uses: microsoft/setup-msbuild@v1.3
+
       - name: Restore NuGet packages
         shell: powershell
         run: nuget restore FieldGraphX.sln
