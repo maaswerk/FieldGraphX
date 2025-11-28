@@ -1,10 +1,14 @@
 ﻿using FieldGraphX.Models;
 using FlowGraphX;
 using McTools.Xrm.Connection;
+using Microsoft.Crm.Sdk.Messages;
 using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Query;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
+using System.Web.Services.Description;
 using System.Windows.Forms;
 using XrmToolBox.Extensibility;
 using Label = System.Windows.Forms.Label;
@@ -17,16 +21,6 @@ namespace FieldGraphX
         private InfoLoader myInfoLoader;
         private FlowVisualizationPanel visualizationPanel;
         private bool isDarkMode = false;
-
-
-        // Dictionary zum Speichern der Flow-Positionen für das Zeichnen der Verbindungen
-        private Dictionary<Guid, Rectangle> flowCardPositions = new Dictionary<Guid, Rectangle>();
-        private List<FlowUsage> currentFlows = new List<FlowUsage>();
-        private List<FlowUsage> allRelevantFlows = new List<FlowUsage>();
-
-        // NEUE STRUKTUR: Gruppierung nach Feldern
-        private Dictionary<string, List<FlowUsage>> fieldTriggerGroups = new Dictionary<string, List<FlowUsage>>();
-        private Dictionary<string, List<FlowUsage>> fieldSetterGroups = new Dictionary<string, List<FlowUsage>>();
 
         public FieldGraphXControl()
         {
@@ -170,7 +164,10 @@ namespace FieldGraphX
                 Work = (w, ev) =>
                 {
                     var analyzer = new FlowAnalyzer(Service);
-                    var hierarchy = analyzer.AnalyzeFlowsHierarchically(entity, field, "EnvID"); // Hierarchische Analyse
+                    var requst = new RetrieveCurrentOrganizationRequest();
+                    var response = (RetrieveCurrentOrganizationResponse)Service.Execute(requst);
+                    var envID = response.Detail.EnvironmentId;
+                    var hierarchy = analyzer.AnalyzeFlowsHierarchically(entity, field, envID.ToString()); // Hierarchische Analyse
                     ev.Result = hierarchy;
                 },
                 PostWorkCallBack = ev =>

@@ -19,7 +19,7 @@ namespace FlowGraphX
             _service = service;
         }
 
-        public List<FlowUsage> AnalyzeFlows(string entityLogicalName, string fieldLogicalName, string environmentUrl)
+        public List<FlowUsage> AnalyzeFlows(string entityLogicalName, string fieldLogicalName, string environmentId)
         {
             if(string.IsNullOrEmpty(entityLogicalName) || string.IsNullOrEmpty(fieldLogicalName))
             {
@@ -76,7 +76,7 @@ namespace FlowGraphX
                         },
                         IsFieldUsedAsTrigger = IsFieldUsedInTrigger(json, entityLogicalName, fieldLogicalName),
                         IsFieldSet = IsFieldSet(json, entityLogicalName, fieldLogicalName),
-                        FlowUrl = $"https://make.powerautomate.com/environments/{environmentUrl}/flows/{flow.GetAttributeValue<Guid>("workflowid").ToString()}/details",
+                        FlowUrl = $"https://make.powerautomate.com/environments/{environmentId}/flows/{flow.GetAttributeValue<Guid>("workflowid").ToString()}/details",
                         FlowID = flow.GetAttributeValue<Guid>("workflowid") // Flow ID für spätere Vergleiche
                         // Dynamische URL basierend auf Umgebung
                     };
@@ -238,15 +238,15 @@ namespace FlowGraphX
             }
             return false;
         }
-        public List<FlowUsage> AnalyzeFlowsHierarchically(string entityLogicalName, string fieldLogicalName, string envUrl)
+        public List<FlowUsage> AnalyzeFlowsHierarchically(string entityLogicalName, string fieldLogicalName, string envId)
         {
             // Alle Flows analysieren und Hierarchie aufbauen
-            var flows = AnalyzeFlows(entityLogicalName, fieldLogicalName, envUrl);
+            var flows = AnalyzeFlows(entityLogicalName, fieldLogicalName, envId);
             var childflows = flows.Where(f => f.IsFieldSet == true && f.IsFieldUsedAsTrigger == false).ToList(); // Nur Flows bei denen der Wert gesetzt wurde
             foreach (var flow in childflows)
             {
                 var rootNode = new FlowHierarchyNode { Flow = flow };
-                flow.Parents = AnalyzeFlowsHierarchically(flow.Trigger.Entity, flow.Trigger.Field.Split(',').First().ToString(), envUrl).Where(parentFlow => parentFlow.FlowID != flow.FlowID).ToList(); // Vergleiche die FlowId.ToList();
+                flow.Parents = AnalyzeFlowsHierarchically(flow.Trigger.Entity, flow.Trigger.Field.Split(',').First().ToString(), envId).Where(parentFlow => parentFlow.FlowID != flow.FlowID).ToList(); // Vergleiche die FlowId.ToList();
             }
             flows = flows.Union(childflows).ToList().Distinct().ToList();
             return flows;
