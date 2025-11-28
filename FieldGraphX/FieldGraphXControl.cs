@@ -67,7 +67,7 @@ namespace FieldGraphX
                 cmbFields.DataSource = new List<string>();
             }
             cmbEntities.Text = "msdyn_workorder";
-            cmbFields.Text = "ith_level_txt";
+            cmbFields.Text = "name";
         }
 
 
