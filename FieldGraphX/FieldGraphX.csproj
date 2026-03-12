@@ -73,18 +73,10 @@
     <Compile Include="FieldGraphXControl.cs">
       <SubType>UserControl</SubType>
     </Compile>
-    <Compile Include="FieldGraphXControl.designer.cs">
-      <DependentUpon>FieldGraphXControl.cs</DependentUpon>
-    </Compile>
     <Compile Include="FlowAnalyzer.cs">
       <SubType>UserControl</SubType>
     </Compile>
-    <Compile Include="FlowVisualizationPanel.cs">
-      <SubType>Component</SubType>
-    </Compile>
-    <Compile Include="FlowVisualizer.cs">
-      <SubType>Component</SubType>
-    </Compile>
+    <Compile Include="FlowDependencyAnalyzer.cs" />
     <Compile Include="InfoLoader.cs">
       <SubType>UserControl</SubType>
     </Compile>
@@ -94,11 +86,6 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="app.config" />
-  </ItemGroup>
-  <ItemGroup>
-    <EmbeddedResource Include="FieldGraphXControl.resx">
-      <DependentUpon>FieldGraphXControl.cs</DependentUpon>
-    </EmbeddedResource>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="DockPanelSuite.ThemeVS2015">
