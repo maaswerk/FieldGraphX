@@ -58,7 +58,19 @@ namespace FieldGraphX
         // ── State ─────────────────────────────────────────────────────────────
         private FlowNode _selectedNode;
 
+        // ── Progress tracking ─────────────────────────────────────────────────
+        private System.Windows.Forms.Timer _elapsedTimer;
+        private DateTime _analysisStartTime;
+        private ProgressBar _progressBar;
+        private Label _lblProgress;
+
         // ── Colors ────────────────────────────────────────────────────────────
+        // Debug mode
+        private ToolStripButton _tsbDebug;
+        private Panel _debugPanel;
+        private RichTextBox _rtbDebugLog;
+        private bool _debugMode = false;
+
         private static readonly Color ColorBroadTrigger = Color.FromArgb(200, 50, 50);   // red
         private static readonly Color ColorUpdater = Color.FromArgb(34, 139, 34);   // green
         private static readonly Color ColorTrigger = Color.FromArgb(30, 100, 180);  // blue
@@ -124,13 +136,24 @@ namespace FieldGraphX
             };
             _tsbAnalyze.Click += OnAnalyzeClicked;
 
+            _tsbDebug = new ToolStripButton("🐛 Debug")
+            {
+                ForeColor = Color.White,
+                DisplayStyle = ToolStripItemDisplayStyle.Text,
+                CheckOnClick = true,
+                ToolTipText = "Toggle debug log panel"
+            };
+            _tsbDebug.CheckedChanged += OnDebugToggled;
+
             _toolStrip.Items.AddRange(new ToolStripItem[]
             {
                 _tsbClose, _tsSep1,
                 _tslEntity, _tscEntity,
                 _tslField,  _tscField,
                 new ToolStripSeparator(),
-                _tsbAnalyze
+                _tsbAnalyze,
+                new ToolStripSeparator(),
+                _tsbDebug
             });
 
             // ── SplitContainer ─────────────────────────────────────────────────
@@ -267,8 +290,95 @@ namespace FieldGraphX
 
             _split.Panel2.Controls.Add(_detailPanel);
 
+            // ── Progress bar panel (sits between toolbar and split) ───────────
+            var progressPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 28,
+                BackColor = Color.FromArgb(230, 235, 245),
+                Padding = new Padding(6, 4, 6, 4),
+                Visible = false  // hidden until an analysis starts
+            };
+            // name it so we can find it later
+            progressPanel.Name = "progressPanel";
+
+            _progressBar = new ProgressBar
+            {
+                Style = ProgressBarStyle.Marquee,
+                Dock = DockStyle.Fill,
+                MarqueeAnimationSpeed = 25
+            };
+
+            _lblProgress = new Label
+            {
+                Dock = DockStyle.Right,
+                Width = 220,
+                TextAlign = ContentAlignment.MiddleRight,
+                Font = new Font("Segoe UI", 8),
+                ForeColor = Color.FromArgb(60, 80, 120),
+                Text = ""
+            };
+
+            progressPanel.Controls.Add(_progressBar);
+            progressPanel.Controls.Add(_lblProgress);
+
+            // ── Elapsed timer ──────────────────────────────────────────────────
+            _elapsedTimer = new System.Windows.Forms.Timer { Interval = 500 };
+            _elapsedTimer.Tick += OnElapsedTimerTick;
+
+            // ── Debug log panel (docked to bottom, hidden by default) ──────────
+            _debugPanel = new Panel
+            {
+                Name = "debugPanel",
+                Dock = DockStyle.Bottom,
+                Height = 180,
+                Visible = false,
+                BackColor = Color.FromArgb(18, 18, 18),
+                Padding = new Padding(0)
+            };
+
+            var debugHeader = new Label
+            {
+                Text = "  🐛 Debug Log",
+                Dock = DockStyle.Top,
+                Height = 22,
+                BackColor = Color.FromArgb(40, 40, 40),
+                ForeColor = Color.FromArgb(180, 220, 255),
+                Font = new Font("Segoe UI", 8, FontStyle.Bold)
+            };
+
+            var btnClearLog = new Button
+            {
+                Text = "Clear",
+                Dock = DockStyle.Top,
+                Height = 22,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(60, 60, 60),
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI", 7)
+            };
+            btnClearLog.FlatAppearance.BorderSize = 0;
+            btnClearLog.Click += (s, e) => _rtbDebugLog.Clear();
+
+            _rtbDebugLog = new RichTextBox
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                BackColor = Color.FromArgb(18, 18, 18),
+                ForeColor = Color.FromArgb(200, 255, 200),
+                Font = new Font("Consolas", 8),
+                BorderStyle = BorderStyle.None,
+                ScrollBars = RichTextBoxScrollBars.Vertical
+            };
+
+            _debugPanel.Controls.Add(_rtbDebugLog);
+            _debugPanel.Controls.Add(btnClearLog);
+            _debugPanel.Controls.Add(debugHeader);
+
             // ── Assemble ───────────────────────────────────────────────────────
             this.Controls.Add(_split);
+            this.Controls.Add(_debugPanel);    // DockStyle.Bottom
+            this.Controls.Add(progressPanel);  // DockStyle.Top stacks above _split
             this.Controls.Add(_toolStrip);
             this.OnCloseTool += OnCloseToolHandler;
             this.Load += OnLoad;
@@ -321,6 +431,8 @@ namespace FieldGraphX
 
         private void OnCloseToolHandler(object sender, EventArgs e)
         {
+            _elapsedTimer.Stop();
+            _elapsedTimer.Dispose();
             SettingsManager.Instance.Save(GetType(), _settings);
         }
 
@@ -361,6 +473,154 @@ namespace FieldGraphX
             if (_tscField.Items.Count > 0) _tscField.SelectedIndex = 0;
         }
 
+        // ──────────────────────────────────────────────────────────────────────
+        //  Progress helpers
+        // ──────────────────────────────────────────────────────────────────────
+
+        // ──────────────────────────────────────────────────────────────────────
+        //  Debug mode
+        // ──────────────────────────────────────────────────────────────────────
+
+        private void OnDebugToggled(object sender, EventArgs e)
+        {
+            _debugMode = _tsbDebug.Checked;
+            _debugPanel.Visible = _debugMode;
+
+            _tsbDebug.ForeColor = _debugMode
+                ? Color.FromArgb(255, 220, 80)   // amber when active
+                : Color.White;
+
+            if (_debugMode)
+            {
+                DebugLog("── Debug mode enabled ──────────────────────────────");
+                DebugLog("Logs will appear here while analysis runs.");
+                DebugLog("Colors:  white = entering level  |  cyan = flow found");
+                DebugLog("         green = match  |  yellow = recurse  |  gray = skip");
+                DebugLog("────────────────────────────────────────────────────");
+            }
+        }
+
+        /// <summary>
+        /// Thread-safe: can be called from the background worker thread.
+        /// Appends a timestamped, color-coded line to the debug log.
+        /// </summary>
+        private void DebugLog(string message, DebugLogLevel level = DebugLogLevel.Info)
+        {
+            if (!_debugMode) return;
+
+            // Always marshal back to the UI thread
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<string, DebugLogLevel>(DebugLog), message, level);
+                return;
+            }
+
+            Color color;
+            string prefix;
+            switch (level)
+            {
+                case DebugLogLevel.Enter:
+                    color = Color.White;
+                    prefix = "→ ";
+                    break;
+                case DebugLogLevel.Found:
+                    color = Color.FromArgb(100, 220, 255);  // cyan
+                    prefix = "  ✓ ";
+                    break;
+                case DebugLogLevel.Match:
+                    color = Color.FromArgb(100, 255, 140);  // green
+                    prefix = "  ★ ";
+                    break;
+                case DebugLogLevel.Recurse:
+                    color = Color.FromArgb(255, 220, 80);   // yellow
+                    prefix = "  ↳ ";
+                    break;
+                case DebugLogLevel.Skip:
+                    color = Color.FromArgb(130, 130, 130);  // gray
+                    prefix = "  ✗ ";
+                    break;
+                case DebugLogLevel.Warning:
+                    color = Color.FromArgb(255, 120, 80);   // orange
+                    prefix = "  ⚠ ";
+                    break;
+                default:
+                    color = Color.FromArgb(200, 255, 200);
+                    prefix = "    ";
+                    break;
+            }
+
+            string timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+            string line = $"[{timestamp}] {prefix}{message}\r\n";
+
+            _rtbDebugLog.SelectionStart = _rtbDebugLog.TextLength;
+            _rtbDebugLog.SelectionLength = 0;
+            _rtbDebugLog.SelectionColor = color;
+            _rtbDebugLog.AppendText(line);
+            _rtbDebugLog.SelectionColor = _rtbDebugLog.ForeColor;
+            _rtbDebugLog.ScrollToCaret();
+        }
+
+        private void StartProgress(string entity, string field)
+        {
+            _analysisStartTime = DateTime.UtcNow;
+
+            // Show the progress panel
+            var panel = Controls["progressPanel"] as Panel;
+            if (panel != null) panel.Visible = true;
+
+            _lblProgress.Text = $"Analyzing {entity}.{field}  |  0s elapsed";
+            _tsbAnalyze.Enabled = false;
+            _elapsedTimer.Start();
+        }
+
+        private void StopProgress(int flowCount)
+        {
+            _elapsedTimer.Stop();
+
+            var elapsed = DateTime.UtcNow - _analysisStartTime;
+            string timeStr = elapsed.TotalSeconds < 60
+                ? $"{elapsed.TotalSeconds:F1}s"
+                : $"{(int)elapsed.TotalMinutes}m {elapsed.Seconds}s";
+
+            _lblProgress.Text = flowCount > 0
+                ? $"Done – {flowCount} flow(s) found in {timeStr}"
+                : $"Done – no flows found  ({timeStr})";
+
+            // Hide the marquee, keep the label visible as a summary
+            _progressBar.Visible = false;
+            _tsbAnalyze.Enabled = true;
+        }
+
+        private void OnElapsedTimerTick(object sender, EventArgs e)
+        {
+            var elapsed = DateTime.UtcNow - _analysisStartTime;
+
+            // Build a gentle "still working" message that changes every tick
+            string spinner;
+            switch ((int)(elapsed.TotalSeconds * 2) % 4)
+            {
+                case 0: spinner = "⠋"; break;
+                case 1: spinner = "⠙"; break;
+                case 2: spinner = "⠸"; break;
+                default: spinner = "⠴"; break;
+            }
+
+            string timeStr = elapsed.TotalSeconds < 60
+                ? $"{elapsed.TotalSeconds:F0}s"
+                : $"{(int)elapsed.TotalMinutes}m {elapsed.Seconds}s";
+
+            // Rough estimate: Dataverse LIKE queries typically take 1-3s each.
+            // We don't know the total but we can show a helpful note after thresholds.
+            string hint;
+            if (elapsed.TotalSeconds < 5) hint = "Fetching flows…";
+            else if (elapsed.TotalSeconds < 15) hint = "Parsing flow definitions…";
+            else if (elapsed.TotalSeconds < 30) hint = "Tracing dependencies…";
+            else if (elapsed.TotalSeconds < 60) hint = "Deep dependency chain detected…";
+            else hint = "Large environment – still working…";
+
+            _lblProgress.Text = $"{spinner} {hint}  |  {timeStr} elapsed";
+        }
+
         private void OnAnalyzeClicked(object sender, EventArgs e)
         {
             string entity = _tscEntity.Text?.Trim().ToLowerInvariant();
@@ -375,29 +635,39 @@ namespace FieldGraphX
 
             _tree.Nodes.Clear();
             ClearDetailPanel();
-            _tsbAnalyze.Enabled = false;
+
+            // Reset progress bar visibility for a fresh run
+            _progressBar.Visible = true;
+            StartProgress(entity, field);
 
             WorkAsync(new WorkAsyncInfo
             {
-                Message = $"Analyzing flows for {entity}.{field}…",
+                Message = string.Empty,   // suppress the default XTB overlay
                 Work = (w, ev) =>
                 {
-                    var analyzer = new FlowDependencyAnalyzer(Service, _environmentId);
+                    // Build a thread-safe debug logger that marshals to the UI thread
+                    Action<string, int> debugCallback = _debugMode
+                        ? (msg, lvl) => DebugLog(msg, (DebugLogLevel)lvl)
+                        : (Action<string, int>)null;
+
+                    var analyzer = new FlowDependencyAnalyzer(Service, _environmentId, debugCallback);
                     ev.Result = analyzer.BuildDependencyTree(entity, field);
                 },
                 PostWorkCallBack = ev =>
                 {
-                    _tsbAnalyze.Enabled = true;
-
                     if (ev.Error != null)
                     {
-                        MessageBox.Show($"Analysis failed:\n{ev.Error.Message} \n{ev.Error.StackTrace} \n {ev.Error.InnerException}", "FieldGraphX",
+                        StopProgress(0);
+                        MessageBox.Show($"Analysis failed:\n{ev.Error.Message}", "FieldGraphX",
                                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                         return;
                     }
 
                     var nodes = ev.Result as List<FlowNode>;
-                    if (nodes == null || nodes.Count == 0)
+                    int count = nodes?.Count ?? 0;
+                    StopProgress(count);
+
+                    if (count == 0)
                     {
                         MessageBox.Show("No Cloud Flows found for this entity/field combination.",
                                         "FieldGraphX", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -727,5 +997,16 @@ namespace FieldGraphX
             rtb.AppendText(text + "\n");
             rtb.SelectionColor = Color.Black;
         }
+    }
+
+    internal enum DebugLogLevel
+    {
+        Info,
+        Enter,
+        Found,
+        Match,
+        Recurse,
+        Skip,
+        Warning
     }
 }

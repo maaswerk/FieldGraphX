@@ -1,12 +1,26 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using Microsoft.Xrm.Sdk;
+﻿using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Query;
 using Newtonsoft.Json.Linq;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Security.Policy;
 
 namespace FieldGraphX.Logic
 {
+    // Mirror of the UI-side DebugLogLevel – kept here so the analyzer
+    // has no dependency on the FieldGraphX UI namespace.
+    // Values MUST match FieldGraphX.DebugLogLevel exactly (cast by ordinal).
+    internal enum AnalyzerLogLevel
+    {
+        Info = 0,
+        Enter = 1,
+        Found = 2,
+        Match = 3,
+        Recurse = 4,
+        Skip = 5,
+        Warning = 6
+    }
     // ──────────────────────────────────────────────────────────────────────────
     // Models
     // ──────────────────────────────────────────────────────────────────────────
@@ -122,7 +136,9 @@ namespace FieldGraphX.Logic
         /// </summary>
         public bool IsBroadTrigger => Trigger?.IsBroadTrigger ?? false;
 
-        /// <summary>Child nodes in the dependency tree (flows that cause THIS flow to trigger).</summary>
+        /// <summary>Upstream flows that write the field this flow triggers on.</summary>
+        public List<FlowNode> Parents { get; set; } = new List<FlowNode>();
+        /// <summary>Downstream flows that this flow causes to run by writing their trigger field.</summary>
         public List<FlowNode> Children { get; set; } = new List<FlowNode>();
     }
 
@@ -318,10 +334,17 @@ namespace FieldGraphX.Logic
                              ?? string.Empty;
 
             // Collect every "item/<fieldName>" key – these are the fields being written.
+            // Power Automate appends OData binding suffixes to lookup fields, e.g.:
+            //   "item/customerid_account@odata.bind"  → logical name is "customerid"
+            //   "item/ownerid_systemuser@odata.bind"  → logical name is "ownerid"
+            //   "item/title"                          → logical name is "title"
+            // We strip everything from the first underscore-preceded "@odata" or from
+            // the "@" character, then also strip any trailing "_<entitytype>" suffix
+            // that Power Automate adds before the @odata part.
             var updatedFields = parameters
                 .Properties()
                 .Where(p => p.Name.StartsWith("item/", StringComparison.OrdinalIgnoreCase))
-                .Select(p => p.Name.Substring("item/".Length).Trim().ToLowerInvariant())
+                .Select(p => NormalizeFieldKey(p.Name.Substring("item/".Length)))
                 .Where(f => !string.IsNullOrWhiteSpace(f))
                 .ToList();
 
@@ -346,6 +369,43 @@ namespace FieldGraphX.Logic
             var parts = expr.Trim().Split(' ');
             return parts.Length > 0 ? parts[0].Trim() : null;
         }
+
+        /// <summary>
+        /// Strips OData binding suffixes that Power Automate appends to lookup field keys.
+        ///
+        /// Examples:
+        ///   "customerid_account@odata.bind"  → "customerid"
+        ///   "ownerid_systemuser@odata.bind"  → "ownerid"
+        ///   "regardingobjectid_incident"     → "regardingobjectid"  (no @odata suffix)
+        ///   "title"                          → "title"              (plain field, unchanged)
+        ///
+        /// Pattern: the logical name is everything before the LAST underscore that is
+        /// followed by an entity-type name, which itself is followed by "@odata" or end-of-string.
+        /// The safest heuristic: if the key contains "@", take everything before the last "_"
+        /// that precedes the "@".  If no "@", return as-is (already a plain logical name).
+        /// </summary>
+        private static string NormalizeFieldKey(string rawKey)
+        {
+            if (string.IsNullOrWhiteSpace(rawKey)) return rawKey;
+
+            rawKey = rawKey.Trim().ToLowerInvariant();
+
+            // Find the @ character – present on all OData binding suffixes
+            int atIndex = rawKey.IndexOf('@');
+            if (atIndex < 0)
+                return rawKey; // plain field like "title", "statecode" – return unchanged
+
+            // Everything before the @ is e.g. "customerid_account"
+            string beforeAt = rawKey.Substring(0, atIndex);
+
+            // Strip the "_<entitytype>" suffix: find the last underscore
+            int lastUnderscore = beforeAt.LastIndexOf('_');
+            if (lastUnderscore > 0)
+                return beforeAt.Substring(0, lastUnderscore); // → "customerid"
+
+            // No underscore found (unusual) – return the part before @
+            return beforeAt;
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -355,33 +415,57 @@ namespace FieldGraphX.Logic
     /// <summary>
     /// Builds the full dependency tree for a given entity/field combination.
     ///
-    /// Algorithm (backward tracing):
-    ///  1. Find all flows that mention <entity> AND <field> in clientdata.
-    ///  2. For each such flow: parse trigger + update actions.
-    ///  3. Mark whether the searched field is used as a trigger or is being updated.
-    ///  4. For every flow that UPDATES the searched field:
-    ///       – determine its own trigger entity/field
-    ///       – recursively search for flows that update THAT trigger field
-    ///         (guarded by a visited-set to prevent infinite loops)
-    ///       – stop recursion when a broad trigger is encountered
+    /// Algorithm (bidirectional tracing):
+    ///
+    ///  STEP 1 — Find direct participants
+    ///    Fetch all flows whose clientdata mentions entity+field.
+    ///    Each flow is classified as:
+    ///      • Updater  – has an action that writes entity.field
+    ///      • Trigger  – has a CDS trigger that fires when entity.field changes
+    ///
+    ///  STEP 2 — Backward tracing (upstream parents of updaters)
+    ///    For every Updater that has a CDS trigger on entity2.field2:
+    ///    search for flows that UPDATE entity2.field2 → those are its parents.
+    ///
+    ///  STEP 3 — Forward tracing (downstream children of updaters)
+    ///    For every Updater: collect all OTHER fields it writes.
+    ///    For each written field, search for flows that TRIGGER on that field.
+    ///    Those flows are downstream children.
+    ///
+    ///  Loop protection: a HashSet<Guid> tracks every flowId in the current
+    ///  call stack to prevent infinite recursion on circular dependencies.
     /// </summary>
     public class FlowDependencyAnalyzer
     {
         private readonly IOrganizationService _service;
         private readonly string _environmentId;
+        // Optional debug callback: (message, level-as-int) → void
+        // Null when debug mode is off – checked before every call so there is
+        // zero overhead in normal operation.
+        private readonly Action<string, int> _log;
 
-        public FlowDependencyAnalyzer(IOrganizationService service, string environmentId)
+        public FlowDependencyAnalyzer(
+            IOrganizationService service,
+            string environmentId,
+            Action<string, int> debugLog = null)
         {
             _service = service;
             _environmentId = environmentId ?? string.Empty;
+            _log = debugLog;
+        }
+
+        private void Log(string message, AnalyzerLogLevel level = AnalyzerLogLevel.Info)
+        {
+            _log?.Invoke(message, (int)level);
         }
 
         // ── Public entry point ─────────────────────────────────────────────────
 
-        /// <summary>
-        /// Returns the flat list of all root FlowNodes for the given entity/field.
-        /// Each node's .Children property contains the backward dependency chain.
-        /// </summary>
+        // Maximum recursion depth. Prevents runaway traversal in large envs.
+        // 6 levels covers: trigger-field → updater → its trigger-field → updater → …
+        // which is already a very deep real-world chain.
+        private const int MaxDepth = 6;
+
         public List<FlowNode> BuildDependencyTree(
             string entityLogicalName,
             string fieldLogicalName)
@@ -393,49 +477,93 @@ namespace FieldGraphX.Logic
             entityLogicalName = entityLogicalName.Trim().ToLowerInvariant();
             fieldLogicalName = fieldLogicalName.Trim().ToLowerInvariant();
 
-            // Global visited set across the entire tree build to avoid duplicate subtrees
-            var globalVisited = new HashSet<Guid>();
+            Log($"════ BuildDependencyTree START  {entityLogicalName}.{fieldLogicalName} ════",
+                AnalyzerLogLevel.Enter);
 
-            return BuildLevel(entityLogicalName, fieldLogicalName, globalVisited);
+            // visitedInPath  – guards against circular dependency IN THE CURRENT CALL STACK
+            // exploredFields – guards against re-exploring the same (entity.field) pair
+            //                  anywhere in the tree, preventing the fan-out explosion where
+            //                  every field a flow writes spawns a new independent subtree.
+            var visitedInPath = new HashSet<Guid>();
+            var exploredFields = new HashSet<string>();
+
+            var result = BuildLevel(entityLogicalName, fieldLogicalName,
+                                    visitedInPath, exploredFields, depth: 0);
+
+            Log($"════ BuildDependencyTree END  →  {result.Count} root node(s) ════",
+                AnalyzerLogLevel.Match);
+            return result;
         }
 
-        // ── Private recursive core ─────────────────────────────────────────────
+        // ── Core: build one level of the dependency graph ─────────────────────
 
         private List<FlowNode> BuildLevel(
             string entityName,
             string fieldName,
-            HashSet<Guid> visitedInPath)
+            HashSet<Guid> visitedInPath,
+            HashSet<string> exploredFields,
+            int depth)
         {
+            // Hard depth limit – log and bail out cleanly
+            if (depth > MaxDepth)
+            {
+                Log($"  STOP — MaxDepth ({MaxDepth}) reached at {entityName}.{fieldName}",
+                    AnalyzerLogLevel.Warning);
+                return new List<FlowNode>();
+            }
+
+            // Global field-pair deduplication:
+            // If we have already fully explored this entity.field combination anywhere
+            // in the tree, return empty so we don't re-process the same subtree.
+            string fieldKey = $"{entityName}.{fieldName}";
+            if (!exploredFields.Add(fieldKey))
+            {
+                Log($"  SKIP — {fieldKey} already explored globally", AnalyzerLogLevel.Skip);
+                return new List<FlowNode>();
+            }
+
+            Log($"BuildLevel  entity={entityName}  field={fieldName}  depth={depth}",
+                AnalyzerLogLevel.Enter);
+
             var candidateFlows = FetchCandidateFlows(entityName, fieldName);
+            Log($"  Dataverse returned {candidateFlows.Count} candidate flow(s)");
             var resultNodes = new List<FlowNode>();
 
             foreach (var rawFlow in candidateFlows)
             {
                 var flowId = rawFlow.GetAttributeValue<Guid>("workflowid");
+                var flowName = rawFlow.GetAttributeValue<string>("name") ?? "(unnamed)";
 
-                // ── Loop / duplicate protection ────────────────────────────────
                 if (visitedInPath.Contains(flowId))
+                {
+                    Log($"  SKIP (already in path): {flowName}", AnalyzerLogLevel.Skip);
                     continue;
+                }
 
                 var clientData = rawFlow.GetAttributeValue<string>("clientdata");
                 var trigger = FlowJsonParser.ParseTrigger(clientData);
                 var updates = FlowJsonParser.ParseUpdateActions(clientData);
 
-                // Determine lifecycle status from type + statecode columns
-                int typeValue = rawFlow.GetAttributeValue<int>("type");
-                var stateCode = rawFlow.GetAttributeValue<OptionSetValue>("statecode");
-                int stateCodeValue = stateCode?.Value ?? 1;
+                var typeOsv = rawFlow.GetAttributeValue<OptionSetValue>("type");
+                var stateCodeOsv = rawFlow.GetAttributeValue<OptionSetValue>("statecode");
+                int typeValue = typeOsv?.Value ?? 1;
+                int stateCodeValue = stateCodeOsv?.Value ?? 1;
                 FlowStatus flowStatus =
                     typeValue == 2 ? FlowStatus.Draft :
                     stateCodeValue == 0 ? FlowStatus.Inactive :
-                                                            FlowStatus.Active;
+                                          FlowStatus.Active;
 
-                // Only include the flow if it actually uses the entity+field we searched
                 bool isTrigger = IsTriggerForField(trigger, entityName, fieldName);
                 bool isUpdater = IsUpdaterForField(updates, entityName, fieldName);
 
+                Log($"  Flow: { flowName} trigger={trigger?.Kind.ToString() ?? "none"}  " +
+                    $"isTrigger={isTrigger}  isUpdater={isUpdater}",
+                    (isTrigger || isUpdater) ? AnalyzerLogLevel.Found : AnalyzerLogLevel.Skip);
+
                 if (!isTrigger && !isUpdater)
                     continue;
+
+                Log($"    MATCH — adding to results", AnalyzerLogLevel.Match);
 
                 var node = new FlowNode
                 {
@@ -451,65 +579,120 @@ namespace FieldGraphX.Logic
 
                 resultNodes.Add(node);
 
-                // ── Recurse only for flows that UPDATE the searched field ───────
-                //
-                // Key invariant: a flow is only an upstream dependency of THIS node
-                // when it updates the EXACT entity+field that THIS node's trigger
-                // listens on.
-                //
-                // Example (your bug):
-                //   Searched field  : incident.title
-                //   Flow A trigger  : email.importsequencenumber  → sets incident.title  ← isUpdater
-                //   Flow B trigger  : email.importsequencenumber  → sets incident.title  ← isUpdater
-                //
-                //   Recursion asks: "what flows update email.importsequencenumber?"
-                //   → FetchCandidateFlows("email","importsequencenumber") returns Flow A + Flow B
-                //     because both mention "email" and "importsequencenumber" in clientdata.
-                //   → But neither Flow A nor Flow B actually *writes* email.importsequencenumber —
-                //     they only READ it as their trigger field.
-                //   → IsUpdaterForField(flowA.updates, "email", "importsequencenumber") → FALSE
-                //   → So neither becomes a child of the other. ✓
-                //
                 if (!isUpdater)
-                    continue; // only flows that write the field get upstream parents traced
-
-                // Non-CDS triggers (manual, scheduled, other): they have no Dataverse
-                // trigger field to trace backwards on — stop here.
-                if (trigger == null || trigger.Kind != TriggerKind.CdsRowChange)
+                {
+                    Log($"    SKIP recursion for { flowName} — is trigger-only, no outbound edges",
+                        AnalyzerLogLevel.Skip);
                     continue;
-
-                // STOP: broad trigger — flag it but do not recurse further.
-                if (trigger.IsBroadTrigger)
-                    continue;
-
-                // The trigger field is what THIS flow listens on.
-                // We search for flows that UPDATE that field — those are true parents.
-                string parentEntity = trigger.EntityLogicalName;
-                string parentField = trigger.FilteringFields.FirstOrDefault();
-
-                if (string.IsNullOrWhiteSpace(parentEntity) ||
-                    string.IsNullOrWhiteSpace(parentField))
-                    continue;
-
-                // Guard: don't recurse if we'd search the same entity+field we
-                // already started with — avoids degenerate self-referential loops
-                // not caught by the flowId visited-set (different field, same flow chain).
-                if (parentEntity.Equals(entityName, StringComparison.OrdinalIgnoreCase) &&
-                    parentField.Equals(fieldName, StringComparison.OrdinalIgnoreCase))
-                    continue;
+                }
 
                 visitedInPath.Add(flowId);
-                var parentCandidates = BuildLevel(parentEntity, parentField, visitedInPath);
+                Log($"  Entering recursion for { flowName} (path depth now {visitedInPath.Count})");
+
+                // ── BACKWARD: who causes THIS flow to run? ─────────────────────
+                if (trigger == null || trigger.Kind != TriggerKind.CdsRowChange)
+                {
+                    Log($"    SKIP backward — trigger kind: {trigger?.Kind.ToString() ?? "null"} (no CDS trigger field)",
+                        AnalyzerLogLevel.Skip);
+                }
+                else if (trigger.IsBroadTrigger)
+                {
+                    Log($"    SKIP backward — { flowName} has broad trigger (no filtering attributes)",
+                        AnalyzerLogLevel.Warning);
+                }
+                else
+                {
+                    string upEntity = trigger.EntityLogicalName;
+                    string upField = trigger.FilteringFields.FirstOrDefault();
+
+                    if (string.IsNullOrWhiteSpace(upEntity) || string.IsNullOrWhiteSpace(upField))
+                    {
+                        Log($"    SKIP backward — could not extract trigger entity/field from { flowName}",
+                            AnalyzerLogLevel.Warning);
+                    }
+                    else if (EntityNamesMatch(upEntity, entityName) &&
+                             upField.Equals(fieldName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Log($"    SKIP backward — trigger field is same as search field ({upEntity}.{upField})",
+                            AnalyzerLogLevel.Skip);
+                    }
+                    else
+                    {
+                        Log($"    BACKWARD trace: { flowName} triggers on {upEntity}.{upField}",
+                            AnalyzerLogLevel.Recurse);
+                        var upstreamCandidates = BuildLevel(upEntity, upField, visitedInPath, exploredFields, depth + 1);
+                        Log($"    BACKWARD result: {upstreamCandidates.Count} candidate(s) for {upEntity}.{upField}");
+
+                        foreach (var candidate in upstreamCandidates)
+                        {
+                            if (IsUpdaterForField(candidate.UpdateActions, upEntity, upField))
+                            {
+                                Log($"    PARENT found: { candidate.FlowName} writes {upEntity}.{upField}",
+                                    AnalyzerLogLevel.Match);
+                                node.Parents.Add(candidate);
+                            }
+                            else
+                            {
+                                Log($"    NOT a parent: { candidate.FlowName} does not write {upEntity}.{upField}",
+                                    AnalyzerLogLevel.Skip);
+                            }
+                        }
+                    }
+                }
+
+                // ── FORWARD: what does THIS flow cause to run? ─────────────────
+                foreach (var updateAction in updates)
+                {
+                    string downEntity = updateAction.EntityLogicalName;
+                    if (string.IsNullOrWhiteSpace(downEntity))
+                    {
+                        Log($"    SKIP forward action — no entity name (fields: {string.Join(", ", updateAction.UpdatedFields)})",
+                            AnalyzerLogLevel.Skip);
+                        continue;
+                    }
+
+                    foreach (var writtenField in updateAction.UpdatedFields)
+                    {
+                        if (EntityNamesMatch(downEntity, entityName) &&
+                            writtenField.Equals(fieldName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            Log($"    SKIP forward — {downEntity}.{writtenField} is the searched field itself",
+                                AnalyzerLogLevel.Skip);
+                            continue;
+                        }
+
+                        Log($"    FORWARD trace: { flowName} writes {downEntity}.{writtenField}",
+                            AnalyzerLogLevel.Recurse);
+                        var downstreamCandidates = BuildLevel(downEntity, writtenField, visitedInPath, exploredFields, depth + 1);
+                        Log($"    FORWARD result: {downstreamCandidates.Count} candidate(s) for {downEntity}.{writtenField}");
+
+                        foreach (var candidate in downstreamCandidates)
+                        {
+                            if (IsTriggerForField(candidate.Trigger, downEntity, writtenField))
+                            {
+                                if (!node.Children.Any(c => c.FlowId == candidate.FlowId))
+                                {
+                                    Log($"    CHILD found: { candidate.FlowName} triggers on {downEntity}.{writtenField}",
+                                        AnalyzerLogLevel.Match);
+                                    node.Children.Add(candidate);
+                                }
+                                else
+                                {
+                                    Log($"    CHILD already added: { candidate.FlowName}",
+                                        AnalyzerLogLevel.Skip);
+                                }
+                            }
+                            else
+                            {
+                                Log($"    NOT a child: { candidate.FlowName} does not trigger on {downEntity}.{writtenField}",
+                                    AnalyzerLogLevel.Skip);
+                            }
+                        }
+                    }
+                }
+
                 visitedInPath.Remove(flowId);
-
-                // ── Critical filter ────────────────────────────────────────────
-                // Only keep candidates that actually WRITE parentEntity.parentField.
-                // Flows that merely READ it (e.g. as their own trigger) are NOT parents.
-                var trueParents = parentCandidates
-                    .Where(p => IsUpdaterForField(p.UpdateActions, parentEntity, parentField))
-                    .ToList();
-
-                node.Children.AddRange(trueParents);
+                Log($"  visitedInPath depth after pop: {visitedInPath.Count}");
             }
 
             return resultNodes;
@@ -571,7 +754,7 @@ namespace FieldGraphX.Logic
             // They will still appear in the tree because IsUpdaterForField may be true.
             if (trigger.Kind != TriggerKind.CdsRowChange) return false;
 
-            if (!trigger.EntityLogicalName.Equals(entityName, StringComparison.OrdinalIgnoreCase))
+            if (!EntityNamesMatch(trigger.EntityLogicalName, entityName))
                 return false;
 
             // Broad trigger: no filtering attributes means it fires on every update of the entity.
