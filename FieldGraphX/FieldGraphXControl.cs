@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.IO;
 using System.Linq;
 using System.Windows.Forms;
 using FieldGraphX.Logic;
@@ -69,6 +70,7 @@ namespace FieldGraphX
         private ToolStripButton _tsbDebug;
         private Panel _debugPanel;
         private RichTextBox _rtbDebugLog;
+        private string _lastLogPath;   // path of the most recently auto-saved log
         private bool _debugMode = false;
 
         private static readonly Color ColorBroadTrigger = Color.FromArgb(200, 50, 50);   // red
@@ -347,11 +349,21 @@ namespace FieldGraphX
                 Font = new Font("Segoe UI", 8, FontStyle.Bold)
             };
 
+            // Button row: Clear | Save Log
+            var btnRowPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 24,
+                BackColor = Color.FromArgb(30, 30, 30)
+            };
+
             var btnClearLog = new Button
             {
                 Text = "Clear",
-                Dock = DockStyle.Top,
+                Width = 60,
                 Height = 22,
+                Left = 2,
+                Top = 1,
                 FlatStyle = FlatStyle.Flat,
                 BackColor = Color.FromArgb(60, 60, 60),
                 ForeColor = Color.White,
@@ -359,6 +371,24 @@ namespace FieldGraphX
             };
             btnClearLog.FlatAppearance.BorderSize = 0;
             btnClearLog.Click += (s, e) => _rtbDebugLog.Clear();
+
+            var btnSaveLog = new Button
+            {
+                Text = "💾 Save Log…",
+                Width = 90,
+                Height = 22,
+                Left = 66,
+                Top = 1,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(40, 80, 40),
+                ForeColor = Color.FromArgb(180, 255, 180),
+                Font = new Font("Segoe UI", 7)
+            };
+            btnSaveLog.FlatAppearance.BorderSize = 0;
+            btnSaveLog.Click += (s, e) => SaveDebugLog(showDialog: true);
+
+            btnRowPanel.Controls.Add(btnClearLog);
+            btnRowPanel.Controls.Add(btnSaveLog);
 
             _rtbDebugLog = new RichTextBox
             {
@@ -372,7 +402,7 @@ namespace FieldGraphX
             };
 
             _debugPanel.Controls.Add(_rtbDebugLog);
-            _debugPanel.Controls.Add(btnClearLog);
+            _debugPanel.Controls.Add(btnRowPanel);
             _debugPanel.Controls.Add(debugHeader);
 
             // ── Assemble ───────────────────────────────────────────────────────
@@ -560,6 +590,57 @@ namespace FieldGraphX
             _rtbDebugLog.ScrollToCaret();
         }
 
+        private void SaveDebugLog(bool showDialog)
+        {
+            string logText = _rtbDebugLog.Text;
+            if (string.IsNullOrEmpty(logText))
+            {
+                if (showDialog)
+                    MessageBox.Show("The debug log is empty.", "Save Log",
+                                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string path;
+            if (showDialog)
+            {
+                using (var dlg = new SaveFileDialog
+                {
+                    Title = "Save Debug Log",
+                    Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*",
+                    DefaultExt = "txt",
+                    FileName = $"FieldGraphX_debug_{DateTime.Now:yyyyMMdd_HHmmss}.txt",
+                    InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
+                })
+                {
+                    if (dlg.ShowDialog() != DialogResult.OK) return;
+                    path = dlg.FileName;
+                }
+            }
+            else
+            {
+                // Auto-save to temp folder — used at end of each analysis
+                string dir = Path.Combine(Path.GetTempPath(), "FieldGraphX");
+                Directory.CreateDirectory(dir);
+                path = Path.Combine(dir, $"debug_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
+            }
+
+            try
+            {
+                File.WriteAllText(path, logText, System.Text.Encoding.UTF8);
+                _lastLogPath = path;
+
+                if (showDialog)
+                    MessageBox.Show($"Log saved to: { path}", "Save Log",
+                                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Could not save log:{ ex.Message}", "Save Log",
+                                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
         private void StartProgress(string entity, string field)
         {
             _analysisStartTime = DateTime.UtcNow;
@@ -589,6 +670,10 @@ namespace FieldGraphX
             // Hide the marquee, keep the label visible as a summary
             _progressBar.Visible = false;
             _tsbAnalyze.Enabled = true;
+
+            // Auto-save log to temp so it's available even if the app hangs next time
+            if (_debugMode)
+                SaveDebugLog(showDialog: false);
         }
 
         private void OnElapsedTimerTick(object sender, EventArgs e)

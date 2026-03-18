@@ -1,10 +1,9 @@
-﻿using Microsoft.Xrm.Sdk;
-using Microsoft.Xrm.Sdk.Query;
-using Newtonsoft.Json.Linq;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Security.Policy;
+using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Query;
+using Newtonsoft.Json.Linq;
 
 namespace FieldGraphX.Logic
 {
@@ -258,7 +257,12 @@ namespace FieldGraphX.Logic
 
         /// <summary>
         /// Returns every "Update a row" (or equivalent) action found anywhere in the flow JSON,
-        /// including inside branches, loops, and scopes.
+        /// including inside branches, loops, scopes, and any other nesting.
+        ///
+        /// Instead of trying to enumerate every possible PA container key (actions, body,
+        /// else, cases, default, …), we do a full deep walk of the entire JSON tree and
+        /// inspect every JObject node that has an "inputs.parameters" child with "item/*"
+        /// keys. This is future-proof against new action container types.
         /// </summary>
         public static IReadOnlyList<FlowUpdateInfo> ParseUpdateActions(string clientDataJson)
         {
@@ -267,11 +271,8 @@ namespace FieldGraphX.Logic
             try
             {
                 var root = JObject.Parse(clientDataJson);
-                var actions = root.SelectToken("properties.definition.actions") as JObject;
-                if (actions == null) return Array.Empty<FlowUpdateInfo>();
-
                 var results = new List<FlowUpdateInfo>();
-                CollectUpdateActions(actions, results);
+                DeepCollectUpdateActions(root, results);
                 return results;
             }
             catch
@@ -282,42 +283,28 @@ namespace FieldGraphX.Logic
 
         // ── Helpers ────────────────────────────────────────────────────────────
 
-        private static void CollectUpdateActions(JObject actionsObject, List<FlowUpdateInfo> results)
+        /// <summary>
+        /// Recursively walks every JObject in the token tree.
+        /// For each node that looks like a CDS update/create action
+        /// (has inputs.parameters with item/* keys), extracts a FlowUpdateInfo.
+        /// </summary>
+        private static void DeepCollectUpdateActions(JToken token, List<FlowUpdateInfo> results)
         {
-            foreach (var actionProp in actionsObject.Properties())
+            if (token == null) return;
+
+            if (token is JObject obj)
             {
-                var action = actionProp.Value as JObject;
-                if (action == null) continue;
+                // Try to extract an update action from this node
+                TryExtractUpdateAction(obj, results);
 
-                TryExtractUpdateAction(action, results);
-
-                // Recurse into nested action containers: actions, else, cases
-                foreach (var nestedContainerToken in new[]
-                {
-                    action["actions"],
-                    action["else"]?["actions"],
-                })
-                {
-                    if (nestedContainerToken is JObject nested)
-                        CollectUpdateActions(nested, results);
-                }
-
-                // Switch/case branches
-                var switchCases = action["cases"] as JObject;
-                if (switchCases != null)
-                {
-                    foreach (var caseProp in switchCases.Properties())
-                    {
-                        var caseActions = caseProp.Value["actions"] as JObject;
-                        if (caseActions != null)
-                            CollectUpdateActions(caseActions, results);
-                    }
-                }
-
-                // Default branch of switch
-                var defaultActions = action["default"]?["actions"] as JObject;
-                if (defaultActions != null)
-                    CollectUpdateActions(defaultActions, results);
+                // Recurse into all child properties
+                foreach (var prop in obj.Properties())
+                    DeepCollectUpdateActions(prop.Value, results);
+            }
+            else if (token is JArray arr)
+            {
+                foreach (var item in arr)
+                    DeepCollectUpdateActions(item, results);
             }
         }
 
@@ -327,20 +314,10 @@ namespace FieldGraphX.Logic
             if (parameters == null) return;
 
             // "entityName" is present on CDS Update / Create / Upsert actions.
-            // We read it for context but do NOT require it to match — the entity name
-            // stored by Power Automate can differ from the Dataverse logical name
-            // (e.g. "accounts" vs "account", schema names, etc.).
             var entityName = parameters["entityName"]?.ToString()?.Trim().ToLowerInvariant()
                              ?? string.Empty;
 
             // Collect every "item/<fieldName>" key – these are the fields being written.
-            // Power Automate appends OData binding suffixes to lookup fields, e.g.:
-            //   "item/customerid_account@odata.bind"  → logical name is "customerid"
-            //   "item/ownerid_systemuser@odata.bind"  → logical name is "ownerid"
-            //   "item/title"                          → logical name is "title"
-            // We strip everything from the first underscore-preceded "@odata" or from
-            // the "@" character, then also strip any trailing "_<entitytype>" suffix
-            // that Power Automate adds before the @odata part.
             var updatedFields = parameters
                 .Properties()
                 .Where(p => p.Name.StartsWith("item/", StringComparison.OrdinalIgnoreCase))
@@ -348,8 +325,6 @@ namespace FieldGraphX.Logic
                 .Where(f => !string.IsNullOrWhiteSpace(f))
                 .ToList();
 
-            // Also capture OData $select fields being read (useful for trigger detection)
-            // but only store fields that are explicitly WRITTEN (item/* pattern).
             if (updatedFields.Count == 0) return;
 
             results.Add(new FlowUpdateInfo
@@ -444,6 +419,15 @@ namespace FieldGraphX.Logic
         // zero overhead in normal operation.
         private readonly Action<string, int> _log;
 
+        // Result cache: maps "entity.field" → the list of FlowNodes returned by BuildLevel.
+        // Avoids redundant Dataverse queries when multiple flows all write the same field
+        // (e.g. every ARC import flow writes incidents.ith_servicecategory — we only need
+        // to query that subtree once per full tree build).
+        // The cache is only used when the field is NOT currently in the active path
+        // (exploredFields handles the within-path cycle guard separately).
+        private readonly Dictionary<string, List<FlowNode>> _resultsCache
+            = new Dictionary<string, List<FlowNode>>();
+
         public FlowDependencyAnalyzer(
             IOrganizationService service,
             string environmentId,
@@ -464,7 +448,7 @@ namespace FieldGraphX.Logic
         // Maximum recursion depth. Prevents runaway traversal in large envs.
         // 6 levels covers: trigger-field → updater → its trigger-field → updater → …
         // which is already a very deep real-world chain.
-        private const int MaxDepth = 6;
+        private const int MaxDepth = 10;
 
         public List<FlowNode> BuildDependencyTree(
             string entityLogicalName,
@@ -480,10 +464,24 @@ namespace FieldGraphX.Logic
             Log($"════ BuildDependencyTree START  {entityLogicalName}.{fieldLogicalName} ════",
                 AnalyzerLogLevel.Enter);
 
-            // visitedInPath  – guards against circular dependency IN THE CURRENT CALL STACK
-            // exploredFields – guards against re-exploring the same (entity.field) pair
-            //                  anywhere in the tree, preventing the fan-out explosion where
-            //                  every field a flow writes spawns a new independent subtree.
+            // Clear stale cache from any previous run on this analyzer instance.
+            _resultsCache.Clear();
+
+            // Two complementary guards:
+            //
+            // visitedInPath  – path-scoped HashSet<Guid>: prevents the same FLOW from
+            //                  appearing twice in one call stack (circular dependency).
+            //
+            // exploredFields – path-scoped HashSet<string>: prevents the same FIELD
+            //                  from being re-entered within one branch (field-level cycle).
+            //                  It is added before recursing and removed on the way back up,
+            //                  so sibling branches (different flows that also write the same
+            //                  field) can still explore it independently.
+            //
+            // _resultsCache  – global cache per tree build: if a field subtree was already
+            //                  fully computed by a previous branch, reuse that result instead
+            //                  of re-querying Dataverse. This is the explosion preventer:
+            //                  incidents.title gets computed once, not once per ARC flow.
             var visitedInPath = new HashSet<Guid>();
             var exploredFields = new HashSet<string>();
 
@@ -505,21 +503,40 @@ namespace FieldGraphX.Logic
             int depth)
         {
             // Hard depth limit – log and bail out cleanly
-            if (depth > MaxDepth)
+            if (depth >= MaxDepth)
             {
-                Log($"  STOP — MaxDepth ({MaxDepth}) reached at {entityName}.{fieldName}",
+                Log($"  ⚠ STOP — MaxDepth ({MaxDepth}) reached at {entityName}.{fieldName}",
                     AnalyzerLogLevel.Warning);
                 return new List<FlowNode>();
             }
 
-            // Global field-pair deduplication:
-            // If we have already fully explored this entity.field combination anywhere
-            // in the tree, return empty so we don't re-process the same subtree.
+            // Path-scoped field deduplication:
+            // Prevents re-entering the same entity.field within ONE recursive branch,
+            // which would cause infinite loops (A writes field → B triggers on field →
+            // B writes same field → A again…).
+            //
+            // This is path-scoped (not global) so that sibling branches — flows that
+            // independently write the same field — can each still discover downstream
+            // consumers of that field. E.g. both "Sub-Import" and "TEST FLOW" write
+            // incidents.title; each should independently find "testi" as a child.
             string fieldKey = $"{entityName}.{fieldName}";
-            if (!exploredFields.Add(fieldKey))
+            if (exploredFields.Contains(fieldKey))
             {
-                Log($"  SKIP — {fieldKey} already explored globally", AnalyzerLogLevel.Skip);
+                Log($"  ✗ SKIP — {fieldKey} already in current path (cycle guard)", AnalyzerLogLevel.Skip);
                 return new List<FlowNode>();
+            }
+            exploredFields.Add(fieldKey);   // mark for the duration of this branch
+
+            // Check the results cache — if we already computed this field's subtree in a
+            // previous branch (outside the current active path), reuse that result.
+            // We still remove fieldKey from exploredFields here since we're returning early
+            // and the cleanup at the bottom of the method won't run.
+            if (_resultsCache.TryGetValue(fieldKey, out var cached))
+            {
+                Log($"  ✓ CACHE HIT — {cached.Count} node(s) for {fieldKey}",
+                    AnalyzerLogLevel.Skip);
+                exploredFields.Remove(fieldKey);
+                return cached;
             }
 
             Log($"BuildLevel  entity={entityName}  field={fieldName}  depth={depth}",
@@ -556,7 +573,7 @@ namespace FieldGraphX.Logic
                 bool isTrigger = IsTriggerForField(trigger, entityName, fieldName);
                 bool isUpdater = IsUpdaterForField(updates, entityName, fieldName);
 
-                Log($"  Flow: { flowName} trigger={trigger?.Kind.ToString() ?? "none"}  " +
+                Log($"  Flow: {flowName}  trigger={trigger?.Kind.ToString() ?? "none"}  " +
                     $"isTrigger={isTrigger}  isUpdater={isUpdater}",
                     (isTrigger || isUpdater) ? AnalyzerLogLevel.Found : AnalyzerLogLevel.Skip);
 
@@ -581,13 +598,13 @@ namespace FieldGraphX.Logic
 
                 if (!isUpdater)
                 {
-                    Log($"    SKIP recursion for { flowName} — is trigger-only, no outbound edges",
+                    Log($"    SKIP recursion for {flowName} — is trigger-only, no outbound edges",
                         AnalyzerLogLevel.Skip);
                     continue;
                 }
 
                 visitedInPath.Add(flowId);
-                Log($"  Entering recursion for { flowName} (path depth now {visitedInPath.Count})");
+                Log($"  Entering recursion for {flowName}  (path depth now {visitedInPath.Count}");
 
                 // ── BACKWARD: who causes THIS flow to run? ─────────────────────
                 if (trigger == null || trigger.Kind != TriggerKind.CdsRowChange)
@@ -597,7 +614,7 @@ namespace FieldGraphX.Logic
                 }
                 else if (trigger.IsBroadTrigger)
                 {
-                    Log($"    SKIP backward — { flowName} has broad trigger (no filtering attributes)",
+                    Log($"    SKIP backward — {flowName} has broad trigger (no filtering attributes)",
                         AnalyzerLogLevel.Warning);
                 }
                 else
@@ -607,7 +624,7 @@ namespace FieldGraphX.Logic
 
                     if (string.IsNullOrWhiteSpace(upEntity) || string.IsNullOrWhiteSpace(upField))
                     {
-                        Log($"    SKIP backward — could not extract trigger entity/field from { flowName}",
+                        Log($"    SKIP backward — could not extract trigger entity/field from {flowName}",
                             AnalyzerLogLevel.Warning);
                     }
                     else if (EntityNamesMatch(upEntity, entityName) &&
@@ -618,7 +635,7 @@ namespace FieldGraphX.Logic
                     }
                     else
                     {
-                        Log($"    BACKWARD trace: { flowName} triggers on {upEntity}.{upField}",
+                        Log($"    BACKWARD trace: {flowName} triggers on {upEntity}.{upField}",
                             AnalyzerLogLevel.Recurse);
                         var upstreamCandidates = BuildLevel(upEntity, upField, visitedInPath, exploredFields, depth + 1);
                         Log($"    BACKWARD result: {upstreamCandidates.Count} candidate(s) for {upEntity}.{upField}");
@@ -627,13 +644,13 @@ namespace FieldGraphX.Logic
                         {
                             if (IsUpdaterForField(candidate.UpdateActions, upEntity, upField))
                             {
-                                Log($"    PARENT found: { candidate.FlowName} writes {upEntity}.{upField}",
+                                Log($"    PARENT found: {candidate.FlowName} writes {upEntity}.{upField}",
                                     AnalyzerLogLevel.Match);
                                 node.Parents.Add(candidate);
                             }
                             else
                             {
-                                Log($"    NOT a parent: { candidate.FlowName} does not write {upEntity}.{upField}",
+                                Log($"    NOT a parent: {candidate.FlowName} does not write {upEntity}.{upField}",
                                     AnalyzerLogLevel.Skip);
                             }
                         }
@@ -661,7 +678,7 @@ namespace FieldGraphX.Logic
                             continue;
                         }
 
-                        Log($"    FORWARD trace: { flowName} writes {downEntity}.{writtenField}",
+                        Log($"    FORWARD trace: {flowName} writes {downEntity}.{writtenField}",
                             AnalyzerLogLevel.Recurse);
                         var downstreamCandidates = BuildLevel(downEntity, writtenField, visitedInPath, exploredFields, depth + 1);
                         Log($"    FORWARD result: {downstreamCandidates.Count} candidate(s) for {downEntity}.{writtenField}");
@@ -672,19 +689,19 @@ namespace FieldGraphX.Logic
                             {
                                 if (!node.Children.Any(c => c.FlowId == candidate.FlowId))
                                 {
-                                    Log($"    CHILD found: { candidate.FlowName} triggers on {downEntity}.{writtenField}",
+                                    Log($"    CHILD found: {candidate.FlowName} triggers on {downEntity}.{writtenField}",
                                         AnalyzerLogLevel.Match);
                                     node.Children.Add(candidate);
                                 }
                                 else
                                 {
-                                    Log($"    CHILD already added: { candidate.FlowName}",
+                                    Log($"    CHILD already added: {candidate.FlowName}",
                                         AnalyzerLogLevel.Skip);
                                 }
                             }
                             else
                             {
-                                Log($"    NOT a child: { candidate.FlowName} does not trigger on {downEntity}.{writtenField}",
+                                Log($"    NOT a child: {candidate.FlowName} does not trigger on {downEntity}.{writtenField}",
                                     AnalyzerLogLevel.Skip);
                             }
                         }
@@ -695,6 +712,18 @@ namespace FieldGraphX.Logic
                 Log($"  visitedInPath depth after pop: {visitedInPath.Count}");
             }
 
+            // Store result in cache. Future calls for this same field from DIFFERENT
+            // branches (where exploredFields does not already contain fieldKey) will reuse
+            // this result instead of re-querying Dataverse.
+            // Note: the result may be slightly conservative (some flows were skipped via
+            // visitedInPath at the time of this call), but that is safe: any branch that
+            // needs a fuller result will re-enter because exploredFields won't block it —
+            // fieldKey is removed just below before we return.
+            _resultsCache[fieldKey] = resultNodes;
+
+            // Pop this field from the path so sibling branches can still recurse into it.
+            exploredFields.Remove(fieldKey);
+
             return resultNodes;
         }
 
@@ -704,11 +733,35 @@ namespace FieldGraphX.Logic
         /// Fetches all Cloud Flows (category=5, any type/statecode) whose clientdata
         /// contains both the entity name and the field name.
         ///
+        /// The entity LIKE condition uses OR to cover both singular and plural forms
+        /// (e.g. "incident" and "incidents") because Power Automate clientdata sometimes
+        /// uses the singular logical name while Dataverse SDK metadata returns the plural
+        /// collection name — EntityNamesMatch handles both in memory, but the query must
+        /// cast a wide enough net to return candidates for both forms.
+        ///
         /// Note: Using LIKE on clientdata is the only viable approach in Dataverse
         /// without a full-text index. We filter precisely in memory after retrieval.
         /// </summary>
         private IReadOnlyList<Entity> FetchCandidateFlows(string entityName, string fieldName)
         {
+            // Build both singular and plural variants so we don't miss flows whose
+            // clientdata uses a different pluralisation than the caller's entityName.
+            string entitySingular = entityName.EndsWith("s")
+                ? entityName.Substring(0, entityName.Length - 1)
+                : entityName;
+            string entityPlural = entityName.EndsWith("s")
+                ? entityName
+                : entityName + "s";
+
+            // Entity filter: clientdata must contain singular OR plural form
+            var entityFilter = new FilterExpression(LogicalOperator.Or);
+            entityFilter.AddCondition("clientdata", ConditionOperator.Like, $"%{entitySingular}%");
+            entityFilter.AddCondition("clientdata", ConditionOperator.Like, $"%{entityPlural}%");
+
+            // Field filter: clientdata must contain the field name
+            var fieldFilter = new FilterExpression(LogicalOperator.And);
+            fieldFilter.AddCondition("clientdata", ConditionOperator.Like, $"%{fieldName}%");
+
             var query = new QueryExpression("workflow")
             {
                 ColumnSet = new ColumnSet("name", "clientdata", "workflowid", "statecode", "type"),
@@ -719,25 +772,56 @@ namespace FieldGraphX.Logic
                     Conditions     =
                     {
                         new ConditionExpression("category", ConditionOperator.Equal, 5), // Cloud Flow
-                        // No type filter – we fetch Active (1), Inactive (1+statecode=0)
-                        // and Draft (2) flows and colour-code them in the UI.
                     },
-                    Filters =
-                    {
-                        new FilterExpression
-                        {
-                            FilterOperator = LogicalOperator.And,
-                            Conditions     =
-                            {
-                                new ConditionExpression("clientdata", ConditionOperator.Like, $"%{entityName}%"),
-                                new ConditionExpression("clientdata", ConditionOperator.Like, $"%{fieldName}%"),
-                            }
-                        }
-                    }
+                    Filters        = { entityFilter, fieldFilter }
                 }
             };
 
-            return _service.RetrieveMultiple(query).Entities;
+            var results = new List<Entity>(_service.RetrieveMultiple(query).Entities);
+
+            // Second pass: broad-trigger flows on this entity.
+            // A broad CDS trigger has no filteringattributes, so the clientdata only
+            // contains the entity name — NOT any field name. The field LIKE above would
+            // miss them entirely. We do a separate entity-only query and deduplicate.
+            var broadEntityFilter = new FilterExpression(LogicalOperator.Or);
+            broadEntityFilter.AddCondition("clientdata", ConditionOperator.Like, $"%{entitySingular}%");
+            broadEntityFilter.AddCondition("clientdata", ConditionOperator.Like, $"%{entityPlural}%");
+
+            var broadQuery = new QueryExpression("workflow")
+            {
+                ColumnSet = new ColumnSet("name", "clientdata", "workflowid", "statecode", "type"),
+                TopCount = 5000,
+                Criteria =
+                {
+                    FilterOperator = LogicalOperator.And,
+                    Conditions     =
+                    {
+                        new ConditionExpression("category", ConditionOperator.Equal, 5),
+                    },
+                    Filters = { broadEntityFilter }
+                }
+            };
+
+            var existingIds = new HashSet<Guid>(results.Select(e => e.GetAttributeValue<Guid>("workflowid")));
+            foreach (var candidate in _service.RetrieveMultiple(broadQuery).Entities)
+            {
+                var id = candidate.GetAttributeValue<Guid>("workflowid");
+                if (existingIds.Contains(id)) continue;
+
+                // Only include if it parses as a broad CDS trigger on this entity
+                var clientData = candidate.GetAttributeValue<string>("clientdata");
+                var trigger = FlowJsonParser.ParseTrigger(clientData);
+                if (trigger != null &&
+                    trigger.Kind == TriggerKind.CdsRowChange &&
+                    trigger.IsBroadTrigger &&
+                    EntityNamesMatch(trigger.EntityLogicalName, entityName))
+                {
+                    results.Add(candidate);
+                    existingIds.Add(id);
+                }
+            }
+
+            return results;
         }
 
         // ── Field-match helpers ────────────────────────────────────────────────
