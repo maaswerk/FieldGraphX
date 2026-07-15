@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>FieldGraphX Dependency Graph</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+               font-family: "Segoe UI", sans-serif; background: #ffffff; }
+  #toolbar { position: absolute; top: 8px; left: 8px; z-index: 10; }
+  #toolbar button { font-size: 12px; padding: 3px 10px; margin-right: 4px;
+                    background: #f3f2f1; border: 1px solid #c8c6c4; border-radius: 3px; cursor: pointer; }
+  #toolbar button:hover { background: #e1dfdd; }
+  #network { width: 100%; height: 100%; }
+  #empty { position: absolute; top: 45%; width: 100%; text-align: center; color: #888; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <button onclick="setLayout(true)">Hierarchical</button>
+  <button onclick="setLayout(false)">Force</button>
+  <button onclick="fit()">Fit</button>
+</div>
+<div id="empty">Run an analysis to see the dependency graph.</div>
+<div id="network"></div>
+<script src="vis-network.min.js"></script>
+<script>
+  var network = null;
+  var currentData = null;
+  var hierarchical = true;
+
+  var groupStyles = {
+    seed:         { color: { background: "#FFD966", border: "#BF9000" }, font: { size: 16 } },
+    field:        { color: { background: "#DEEBF7", border: "#2E75B6" } },
+    flow:         { color: { background: "#E2EFDA", border: "#548235" } },
+    flowBroad:    { color: { background: "#FCE4D6", border: "#C55A11" } },
+    flowInactive: { color: { background: "#EDEDED", border: "#A6A6A6" },
+                    font: { color: "#808080" } }
+  };
+
+  function buildOptions() {
+    return {
+      groups: groupStyles,
+      layout: hierarchical
+        ? { hierarchical: { enabled: true, direction: "LR", sortMethod: "directed",
+                            levelSeparation: 220, nodeSpacing: 120 } }
+        : { hierarchical: { enabled: false } },
+      physics: hierarchical
+        ? { enabled: false }
+        : { enabled: true, solver: "forceAtlas2Based",
+            forceAtlas2Based: { gravitationalConstant: -60, springLength: 140 },
+            stabilization: { iterations: 150 } },
+      edges: {
+        smooth: hierarchical ? { type: "cubicBezier", forceDirection: "horizontal" } : true,
+        font: { size: 10, color: "#666", strokeWidth: 4, strokeColor: "#ffffff" },
+        color: { color: "#9a9a9a", highlight: "#2E75B6" }
+      },
+      nodes: {
+        font: { size: 13, multi: false },
+        margin: 8,
+        widthConstraint: { maximum: 260 }
+      },
+      interaction: { hover: true, tooltipDelay: 150 }
+    };
+  }
+
+  function post(msg) {
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.postMessage(msg);
+    }
+  }
+
+  // Called from the host via ExecuteScriptAsync.
+  function renderGraph(data) {
+    currentData = data;
+    document.getElementById("empty").style.display =
+      data && data.nodes && data.nodes.length ? "none" : "block";
+
+    var container = document.getElementById("network");
+    if (network) { network.destroy(); network = null; }
+
+    network = new vis.Network(container, {
+      nodes: new vis.DataSet(data.nodes),
+      edges: new vis.DataSet(data.edges)
+    }, buildOptions());
+
+    network.on("selectNode", function (params) {
+      if (params.nodes.length) post({ type: "select", id: params.nodes[0] });
+    });
+    network.on("doubleClick", function (params) {
+      if (params.nodes.length) post({ type: "open", id: params.nodes[0] });
+    });
+
+    network.once("afterDrawing", fit);
+  }
+
+  // Called from the host to highlight the node selected in the TreeView.
+  function selectNode(id) {
+    if (!network) return;
+    try {
+      network.selectNodes([id], false);
+      network.focus(id, { scale: 1.0, animation: { duration: 300 } });
+    } catch (e) { /* node not in graph */ }
+  }
+
+  function setLayout(useHierarchical) {
+    hierarchical = useHierarchical;
+    if (currentData) renderGraph(currentData);
+  }
+
+  function fit() {
+    if (network) network.fit({ animation: { duration: 300 } });
+  }
+
+  post({ type: "ready" });
+</script>
+</body>
+</html>

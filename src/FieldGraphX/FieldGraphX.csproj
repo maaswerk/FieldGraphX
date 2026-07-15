@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <RootNamespace>FieldGraphX</RootNamespace>
+    <AssemblyName>FieldGraphX</AssemblyName>
+    <Version>2.0.0</Version>
+    <Company>FieldGraphX</Company>
+    <Description>XrmToolBox plugin that visualizes cloud flow dependencies for a Dataverse field.</Description>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <!-- XrmToolBoxPackage and the CRM SDK are classic net4x packages; NU1701 is expected and harmless. -->
+    <NoWarn>$(NoWarn);NU1701</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="All" />
+    <PackageReference Include="XrmToolBoxPackage" Version="1.2023.10.67" />
+    <PackageReference Include="Microsoft.CrmSdk.CoreAssemblies" Version="9.0.2.59" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3296.44" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.ComponentModel.Composition" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FieldGraphX.Core\FieldGraphX.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\graph.html" />
+    <EmbeddedResource Include="Resources\vis-network.min.js" />
+  </ItemGroup>
+
+  <!--
+    Optional developer convenience: copy the plugin into a local XrmToolBox Plugins
+    folder after build. Set the XTB_PLUGINS_DIR environment variable to enable it.
+    (Replaces the old hardcoded per-machine PostBuildEvent.)
+  -->
+  <Target Name="CopyToXtbPlugins" AfterTargets="Build"
+          Condition="'$(OS)' == 'Windows_NT' AND '$(XTB_PLUGINS_DIR)' != ''">
+    <ItemGroup>
+      <PluginFiles Include="$(TargetDir)FieldGraphX.dll;$(TargetDir)FieldGraphX.Core.dll;$(TargetDir)Microsoft.Web.WebView2.*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(PluginFiles)" DestinationFolder="$(XTB_PLUGINS_DIR)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(TargetDir)runtimes\win-x64\native\WebView2Loader.dll"
+          DestinationFolder="$(XTB_PLUGINS_DIR)"
+          Condition="Exists('$(TargetDir)runtimes\win-x64\native\WebView2Loader.dll')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

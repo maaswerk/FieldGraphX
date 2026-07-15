@@ -1,0 +1,27 @@
+{
+  "properties": {
+    "definition": {
+      "triggers": {
+        "manual": { "type": "Request", "inputs": {} }
+      },
+      "actions": {
+        "Update_sharepoint_item": {
+          "type": "OpenApiConnection",
+          "inputs": {
+            "host": {
+              "connectionName": "shared_sharepointonline",
+              "operationId": "PatchItem"
+            },
+            "parameters": {
+              "dataset": "https://contoso.sharepoint.com/sites/x",
+              "table": "Tasks",
+              "id": 4,
+              "item/Title": "Done",
+              "item/Status": "Closed"
+            }
+          }
+        }
+      }
+    }
+  }
+}
