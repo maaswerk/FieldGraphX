@@ -1,0 +1,13 @@
+{
+  "properties": {
+    "definition": {
+      "triggers": {
+        "Recurrence": {
+          "type": "Recurrence",
+          "recurrence": { "frequency": "Day", "interval": 1 }
+        }
+      },
+      "actions": {}
+    }
+  }
+}

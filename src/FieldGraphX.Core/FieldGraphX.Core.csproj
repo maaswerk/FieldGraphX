@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <RootNamespace>FieldGraphX.Core</RootNamespace>
+    <AssemblyName>FieldGraphX.Core</AssemblyName>
+    <Version>2.0.0</Version>
+    <Description>Core analysis engine for FieldGraphX: parses Power Automate cloud flow definitions and builds field/flow dependency graphs.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+</Project>

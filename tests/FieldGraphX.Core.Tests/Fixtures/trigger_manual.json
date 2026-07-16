@@ -1,0 +1,14 @@
+{
+  "properties": {
+    "definition": {
+      "triggers": {
+        "manual": {
+          "type": "Request",
+          "kind": "Button",
+          "inputs": { "schema": {} }
+        }
+      },
+      "actions": {}
+    }
+  }
+}
